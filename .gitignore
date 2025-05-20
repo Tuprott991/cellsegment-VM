@@ -1,0 +1,8 @@
+# ignore prepared and train folders
+# ignore all files in prepared and train folders
+prepared/*
+train/*
+examples/*
+load_datasets.ipynb
+data_train.npy
+mask_train.npy

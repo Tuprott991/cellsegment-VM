@@ -32,8 +32,8 @@ def f1_score(pred, target, threshold=0.5, eps=1e-6):
 # --- Training ---
 def train():
     # Settings
-    images_dir = "prepared/images"
-    masks_dir = "prepared/masks"
+    images_dir = "/kaggle/input/cell-segment/images"
+    masks_dir = "/kaggle/input/cell-segment/masks"
     batch_size = 3
     num_epochs = 30
     pretrain_epochs = 10
@@ -148,5 +148,4 @@ def train():
             print(f"New best model saved at epoch {epoch+1} with F1 {best_f1:.4f}")
 
 if __name__ == "__main__":
-
     train()

@@ -1,183 +1,130 @@
-import torch
-from torch import nn
-from torch.cuda.amp import autocast, GradScaler
-from torch.utils.data import DataLoader
-from loader import *
-
-import UltraLight_VM_UNet
-from engine import *
 import os
-import sys
-os.environ["CUDA_VISIBLE_DEVICES"] = "0" # "0, 1, 2, 3"
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import random_split
+from tqdm import tqdm
+from model_arch import InstanSegModel
+from data_loader import get_loader
+import numpy as np
 
-from utils import *
-from config_setting import setting_config
+# --- Losses ---
+def dice_loss(pred, target, eps=1e-6):
+    pred = torch.sigmoid(pred)
+    intersection = (pred * target).sum()
+    union = pred.sum() + target.sum()
+    return 1 - (2 * intersection + eps) / (union + eps)
 
-import warnings
-warnings.filterwarnings("ignore")
+def bce_loss(pred, target):
+    return nn.functional.binary_cross_entropy_with_logits(pred, target)
 
+def l1_loss(pred, target):
+    return nn.functional.l1_loss(pred, target)
 
-def main(config):
+# --- Validation metric ---
+def f1_score(pred, target, threshold=0.5, eps=1e-6):
+    pred_bin = (torch.sigmoid(pred) > threshold).float()
+    tp = (pred_bin * target).sum()
+    fp = (pred_bin * (1 - target)).sum()
+    fn = ((1 - pred_bin) * target).sum()
+    return (2 * tp + eps) / (2 * tp + fp + fn + eps)
 
-    print('#----------Creating logger----------#')
-    sys.path.append(config.work_dir + '/')
-    log_dir = os.path.join(config.work_dir, 'log')
-    checkpoint_dir = os.path.join(config.work_dir, 'checkpoints')
-    resume_model = os.path.join(checkpoint_dir, 'latest.pth')
-    outputs = os.path.join(config.work_dir, 'outputs')
-    if not os.path.exists(checkpoint_dir):
-        os.makedirs(checkpoint_dir)
-    if not os.path.exists(outputs):
-        os.makedirs(outputs)
+# --- Training ---
+def train():
+    # Settings
+    images_dir = "prepared/images"
+    masks_dir = "prepared/masks"
+    batch_size = 3
+    num_epochs = 30
+    pretrain_epochs = 10
+    batches_per_epoch = 1000
+    lr = 0.001
+    val_split = 0.2
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    K = 50  # Max instances per image
 
-    global logger
-    logger = get_logger('train', log_dir)
+    # Data
+    full_loader = get_loader(images_dir, masks_dir, batch_size=1, shuffle=True, num_workers=2)
+    dataset = full_loader.dataset
+    val_len = int(len(dataset) * val_split)
+    train_len = len(dataset) - val_len
+    train_set, val_set = random_split(dataset, [train_len, val_len])
+    train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=2, drop_last=True)
+    val_loader = torch.utils.data.DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=2)
 
-    log_config_info(config, logger)
+    # Model
+    model = InstanSegModel(in_ch=3, base_ch=32, Dp=2, De=4).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
+    best_f1 = 0
+    save_path = "best_model.pth"
 
+    # --- Pretraining ---
+    print("Pretraining for {} epochs...".format(pretrain_epochs))
+    for epoch in range(pretrain_epochs):
+        model.train()
+        pbar = tqdm(train_loader, total=min(len(train_loader), batches_per_epoch), desc=f"Pretrain Epoch {epoch+1}/{pretrain_epochs}")
+        for i, (images, masks) in enumerate(pbar):
+            if i >= batches_per_epoch:
+                break
+            images, masks = images.to(device), masks.to(device)
+            optimizer.zero_grad()
+            S, P, E, O = model(images)
+            # Pretrain: BCE for S, Dice for instance masks
+            loss_s = bce_loss(S, masks.unsqueeze(1).float())
+            # For instance mask, use Dice loss on S as a proxy (since no instance mask yet)
+            loss_inst = dice_loss(S, masks.unsqueeze(1).float())
+            loss = loss_s + loss_inst
+            loss.backward()
+            optimizer.step()
+            pbar.set_postfix({"loss": loss.item()})
 
+    # --- Main Training ---
+    print("Main training for {} epochs...".format(num_epochs))
+    for epoch in range(num_epochs):
+        model.train()
+        pbar = tqdm(train_loader, total=min(len(train_loader), batches_per_epoch), desc=f"Train Epoch {epoch+1}/{num_epochs}")
+        for i, (images, masks) in enumerate(pbar):
+            if i >= batches_per_epoch:
+                break
+            images, masks = images.to(device), masks.to(device)
+            optimizer.zero_grad()
+            S, P, E, O = model(images)
+            # L1 regression for S (distance map)
+            loss_s = l1_loss(S, masks.unsqueeze(1).float())
+            # Instance segmentation loss: Dice loss on up to K instances
+            # For simplicity, use S as instance mask proxy (real use: segment_instances and compute loss per instance)
+            predicted_masks = model.segment_instances(S, P, E, O, iou_threshold=0.6)  # Post-process to get instance masks
+            if len(predicted_masks) == 0:
+                pred_mask = torch.zeros_like(masks[0])  # [H, W]
+            else:
+                pred_mask = torch.clamp(torch.stack(predicted_masks).sum(dim=0), max=1.0)  # [H, W]
+            loss_inst = dice_loss(pred_mask.unsqueeze(0).unsqueeze(0), masks[0].unsqueeze(0).unsqueeze(0).float())
+            loss = loss_s + loss_inst
+            loss.backward()
+            optimizer.step()
+            pbar.set_postfix({"loss": loss.item()})
 
+        # --- Validation ---
+        model.eval()
+        val_f1s = []
+        with torch.no_grad():
+            for images, masks in tqdm(val_loader, desc="Validating"):
+                images, masks = images.to(device), masks.to(device)
+                S, P, E, O = model(images)
+                predicted_mask = model.segment_instances(S, P, E, O, iou_threshold=0.6)
+                # Compute F1 score for validation
+                val_f1 = f1_score(predicted_mask, masks.unsqueeze(1).float()).item()
+                val_f1s.append(val_f1)
+        mean_f1 = np.mean(val_f1s)
+        print(f"Epoch {epoch+1}: Val F1 = {mean_f1:.4f}")
 
-    print('#----------GPU init----------#')
-    set_seed(config.seed)
-    gpu_ids = [0]# [0, 1, 2, 3]
-    torch.cuda.empty_cache()
+        # Save best model
+        if mean_f1 > best_f1:
+            best_f1 = mean_f1
+            torch.save(model.state_dict(), save_path)
+            print(f"New best model saved at epoch {epoch+1} with F1 {best_f1:.4f}")
 
+if __name__ == "__main__":
 
-
-    print('#----------Preparing dataset----------#')
-    train_dataset = LIVECell(path_Data = config.data_path, train = True)
-    train_loader = DataLoader(train_dataset,
-                                batch_size=config.batch_size, 
-                                shuffle=True,
-                                pin_memory=True,
-                                num_workers=config.num_workers)
-    val_dataset = LIVECell(path_Data = config.data_path, train = False)
-    val_loader = DataLoader(val_dataset,
-                                batch_size=1,
-                                shuffle=False,
-                                pin_memory=True, 
-                                num_workers=config.num_workers,
-                                drop_last=True)
-    test_dataset = LIVECell(path_Data = config.data_path, train = False, Test = True)
-    test_loader = DataLoader(test_dataset,
-                                batch_size=1,
-                                shuffle=False,
-                                pin_memory=True, 
-                                num_workers=config.num_workers,
-                                drop_last=True)
-
-
-
-
-    print('#----------Prepareing Models----------#')
-    model_cfg = config.model_config
-    model = UltraLight_VM_UNet(num_classes=model_cfg['num_classes'], 
-                               input_channels=model_cfg['input_channels'], 
-                               c_list=model_cfg['c_list'], 
-                               split_att=model_cfg['split_att'], 
-                               bridge=model_cfg['bridge'],)
-    
-    model = torch.nn.DataParallel(model.cuda(), device_ids=gpu_ids, output_device=gpu_ids[0])
-
-
-    print('#----------Prepareing loss, opt, sch and amp----------#')
-    criterion = config.criterion
-    optimizer = get_optimizer(config, model)
-    scheduler = get_scheduler(config, optimizer)
-    scaler = GradScaler()
-
-
-
-
-
-    print('#----------Set other params----------#')
-    min_loss = 999
-    start_epoch = 1
-    min_epoch = 1
-
-
-
-
-
-    if os.path.exists(resume_model):
-        print('#----------Resume Model and Other params----------#')
-        checkpoint = torch.load(resume_model, map_location=torch.device('cpu'))
-        model.module.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        saved_epoch = checkpoint['epoch']
-        start_epoch += saved_epoch
-        min_loss, min_epoch, loss = checkpoint['min_loss'], checkpoint['min_epoch'], checkpoint['loss']
-
-        log_info = f'resuming model from {resume_model}. resume_epoch: {saved_epoch}, min_loss: {min_loss:.4f}, min_epoch: {min_epoch}, loss: {loss:.4f}'
-        logger.info(log_info)
-
-
-
-
-
-    print('#----------Training----------#')
-    for epoch in range(start_epoch, config.epochs + 1):
-
-        torch.cuda.empty_cache()
-
-        train_one_epoch(
-            train_loader,
-            model,
-            criterion,
-            optimizer,
-            scheduler,
-            epoch,
-            logger,
-            config,
-            scaler=scaler
-        )
-
-        loss = val_one_epoch(
-                val_loader,
-                model,
-                criterion,
-                epoch,
-                logger,
-                config
-            )
-
-
-        if loss < min_loss:
-            torch.save(model.module.state_dict(), os.path.join(checkpoint_dir, 'best.pth'))
-            min_loss = loss
-            min_epoch = epoch
-
-        torch.save(
-            {
-                'epoch': epoch,
-                'min_loss': min_loss,
-                'min_epoch': min_epoch,
-                'loss': loss,
-                'model_state_dict': model.module.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-            }, os.path.join(checkpoint_dir, 'latest.pth')) 
-
-    if os.path.exists(os.path.join(checkpoint_dir, 'best.pth')):
-        print('#----------Testing----------#')
-        best_weight = torch.load(config.work_dir + 'checkpoints/best.pth', map_location=torch.device('cpu'))
-        model.module.load_state_dict(best_weight)
-        loss = test_one_epoch(
-                test_loader,
-                model,
-                criterion,
-                logger,
-                config,
-            )
-        os.rename(
-            os.path.join(checkpoint_dir, 'best.pth'),
-            os.path.join(checkpoint_dir, f'best-epoch{min_epoch}-loss{min_loss:.4f}.pth')
-        )      
-
-
-if __name__ == '__main__':
-    config = setting_config
-    main(config)
+    train()

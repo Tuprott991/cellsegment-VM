@@ -7,6 +7,21 @@ import math
 from mamba_ssm import Mamba
 
 
+def get_instance_masks(binary_mask: torch.Tensor) -> torch.Tensor:
+    """
+    Convert binary segmentation mask [B, 1, H, W] to instance segmentation mask [B, H, W]
+    Each object is assigned a unique ID (0 is background)
+    """
+    binary_mask = binary_mask.squeeze(1).cpu().numpy().astype(np.uint8)  # [B, H, W]
+    instance_masks = []
+
+    for mask in binary_mask:
+        labeled = measure.label(mask, connectivity=1)  # or cv2.connectedComponents(mask)
+        instance_masks.append(torch.from_numpy(labeled))
+
+    return torch.stack(instance_masks)  # [B, H, W] with instance ids
+
+
 class PVMLayer(nn.Module):
     def __init__(self, input_dim, output_dim, d_state = 16, d_conv = 4, expand = 2):
         super().__init__()

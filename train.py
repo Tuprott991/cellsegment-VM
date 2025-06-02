@@ -94,12 +94,22 @@ def train():
             loss_s = l1_loss(S, masks.unsqueeze(1).float())
             # Instance segmentation loss: Dice loss on up to K instances
             # For simplicity, use S as instance mask proxy (real use: segment_instances and compute loss per instance)
-            predicted_masks = model.segment_instances(S, P, E, O, iou_threshold=0.6)  # Post-process to get instance masks
-            if len(predicted_masks) == 0:
-                pred_mask = torch.zeros_like(masks[0])  # [H, W]
-            else:
-                pred_mask = torch.clamp(torch.stack(predicted_masks).sum(dim=0), max=1.0)  # [H, W]
-            loss_inst = dice_loss(pred_mask.unsqueeze(0).unsqueeze(0), masks[0].unsqueeze(0).unsqueeze(0).float())
+            batch_pred_masks = []
+            for b in range(images.shape[0]):
+                S_b = S[b:b+1]
+                P_b = P[b:b+1]
+                E_b = E[b:b+1]
+                # O is [Dp, H, W], same for all
+                predicted_masks = model.segment_instances(S_b, P_b, E_b, O, iou_threshold=0.6)
+                if len(predicted_masks) == 0:
+                    pred_mask = torch.zeros_like(masks[b])  # [H, W]
+                else:
+                    pred_mask = torch.clamp(torch.stack(predicted_masks).sum(dim=0), max=1.0)
+                batch_pred_masks.append(pred_mask)
+            pred_mask = torch.stack(batch_pred_masks)  # [B, H, W]
+            pred_mask = pred_mask.unsqueeze(1)         # [B, 1, H, W]
+            loss_inst = dice_loss(pred_mask, masks.unsqueeze(1).float())
+
             loss = loss_s + loss_inst
             loss.backward()
             optimizer.step()
@@ -112,9 +122,21 @@ def train():
             for images, masks in tqdm(val_loader, desc="Validating"):
                 images, masks = images.to(device), masks.to(device)
                 S, P, E, O = model(images)
-                predicted_mask = model.segment_instances(S, P, E, O, iou_threshold=0.6)
-                # Compute F1 score for validation
-                val_f1 = f1_score(predicted_mask, masks.unsqueeze(1).float()).item()
+                batch_pred_masks = []
+                for b in range(images.shape[0]):
+                    S_b = S[b:b+1]
+                    P_b = P[b:b+1]
+                    E_b = E[b:b+1]
+                    # O is [Dp, H, W], same for all
+                    predicted_masks = model.segment_instances(S_b, P_b, E_b, O, iou_threshold=0.6)
+                    if len(predicted_masks) == 0:
+                        pred_mask = torch.zeros_like(masks[b])  # [H, W]
+                    else:
+                        pred_mask = torch.clamp(torch.stack(predicted_masks).sum(dim=0), max=1.0)
+                    batch_pred_masks.append(pred_mask)
+                pred_mask = torch.stack(batch_pred_masks)  # [B, H, W]
+                pred_mask = pred_mask.unsqueeze(1)         # [B, 1, H, W]
+                val_f1 = f1_score(pred_mask, masks.unsqueeze(1).float()).item()
                 val_f1s.append(val_f1)
         mean_f1 = np.mean(val_f1s)
         print(f"Epoch {epoch+1}: Val F1 = {mean_f1:.4f}")

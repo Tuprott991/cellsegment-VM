@@ -141,11 +141,9 @@ def train():
         mean_f1 = np.mean(val_f1s)
         print(f"Epoch {epoch+1}: Val F1 = {mean_f1:.4f}")
 
-        # Save best model
-        if mean_f1 > best_f1:
-            best_f1 = mean_f1
-            torch.save(model.state_dict(), save_path)
-            print(f"New best model saved at epoch {epoch+1} with F1 {best_f1:.4f}")
+        # Save model for each epoch, no need to save best model
+        torch.save(model.state_dict(), f"model_epoch_{epoch+1}.pth")
+
 
 if __name__ == "__main__":
     train()

@@ -24,6 +24,7 @@ def instance_dice_loss(pred_masks, gt_masks):
             pred = pred_masks[i]
             gt = gt_masks[j]
             if pred.shape != gt.shape:
+                gt = gt.float()
                 gt = torch.nn.functional.interpolate(
                     gt.unsqueeze(0).unsqueeze(0), size=pred.shape, mode='nearest'
                 ).squeeze(0).squeeze(0)

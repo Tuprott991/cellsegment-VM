@@ -9,11 +9,25 @@ from data_loader import get_loader
 import numpy as np
 
 # --- Losses ---
-def dice_loss(pred, target, eps=1e-6):
-    pred = torch.sigmoid(pred)
+def dice_single(pred, target, eps=1e-6):
     intersection = (pred * target).sum()
     union = pred.sum() + target.sum()
-    return 1 - (2 * intersection + eps) / (union + eps)
+    return (2 * intersection + eps) / (union + eps)
+
+def instance_dice_loss(pred_masks, gt_masks):
+    # pred_masks: [M, H, W], gt_masks: [N, H, W]
+    M, H, W = pred_masks.shape
+    N = gt_masks.shape[0]
+    dice_matrix = torch.zeros(M, N, device=pred_masks.device)
+    for i in range(M):
+        for j in range(N):
+            dice_matrix[i, j] = dice_single(pred_masks[i], gt_masks[j])
+    # Hungarian matching (maximize dice)
+    import scipy.optimize
+    matched_pred, matched_gt = scipy.optimize.linear_sum_assignment(-dice_matrix.cpu().numpy())
+    dice_scores = dice_matrix[matched_pred, matched_gt]
+    # Trung bình Dice cho các cặp matched
+    return 1 - dice_scores.mean()
 
 def bce_loss(pred, target):
     return nn.functional.binary_cross_entropy_with_logits(pred, target)
@@ -73,7 +87,7 @@ def train():
             # Pretrain: BCE for S, Dice for instance masks
             loss_s = bce_loss(S, masks.unsqueeze(1).float())
             # For instance mask, use Dice loss on S as a proxy (since no instance mask yet)
-            loss_inst = dice_loss(S, masks.unsqueeze(1).float())
+            loss_inst = dice_single(S, masks.unsqueeze(1).float())
             loss = loss_s + loss_inst
             loss.backward()
             optimizer.step()
@@ -94,7 +108,7 @@ def train():
             loss_s = l1_loss(S, masks.unsqueeze(1).float())
             # Instance segmentation loss: Dice loss on up to K instances
             # For simplicity, use S as instance mask proxy (real use: segment_instances and compute loss per instance)
-            batch_pred_masks = []
+            batch_inst_losses = []
             for b in range(images.shape[0]):
                 S_b = S[b:b+1]
                 P_b = P[b:b+1]
@@ -102,14 +116,21 @@ def train():
                 # O is [Dp, H, W], same for all
                 predicted_masks = model.segment_instances(S_b, P_b, E_b, O, iou_threshold=0.6)
                 if len(predicted_masks) == 0:
-                    pred_mask = torch.zeros_like(masks[b])  # [H, W]
+                    pred_masks = torch.zeros((1, *masks.shape[-2:]), device=masks.device)  # [1, H, W]
                 else:
-                    pred_mask = torch.clamp(torch.stack(predicted_masks).sum(dim=0), max=1.0)
-                batch_pred_masks.append(pred_mask)
-            pred_mask = torch.stack(batch_pred_masks)  # [B, H, W]
-            pred_mask = pred_mask.unsqueeze(1)         # [B, 1, H, W]
-            loss_inst = dice_loss(pred_mask, masks.unsqueeze(1).float())
-
+                    pred_masks = torch.stack(predicted_masks)  # [M, H, W]
+                # Lấy ground truth instance masks cho ảnh này, giả sử masks[b, 1:] là các instance mask [N, H, W]
+                gt_masks = masks[b, 1:]  # [N, H, W]
+                # Loại bỏ instance mask toàn 0 (nếu có padding)
+                gt_masks = gt_masks[gt_masks.sum(dim=(1,2)) > 0]
+                if gt_masks.shape[0] == 0:
+                    continue
+                inst_loss = instance_dice_loss(pred_masks, gt_masks)
+                batch_inst_losses.append(inst_loss)
+            if len(batch_inst_losses) > 0:
+                loss_inst = torch.stack(batch_inst_losses).mean()
+            else:
+                loss_inst = torch.tensor(0.0, device=images.device)
             loss = loss_s + loss_inst
             loss.backward()
             optimizer.step()
@@ -122,7 +143,6 @@ def train():
             for images, masks in tqdm(val_loader, desc="Validating"):
                 images, masks = images.to(device), masks.to(device)
                 S, P, E, O = model(images)
-                batch_pred_masks = []
                 for b in range(images.shape[0]):
                     S_b = S[b:b+1]
                     P_b = P[b:b+1]
@@ -130,16 +150,25 @@ def train():
                     # O is [Dp, H, W], same for all
                     predicted_masks = model.segment_instances(S_b, P_b, E_b, O, iou_threshold=0.6)
                     if len(predicted_masks) == 0:
-                        pred_mask = torch.zeros_like(masks[b])  # [H, W]
+                        pred_masks = torch.zeros((1, *masks.shape[-2:]), device=masks.device)  # [1, H, W]
                     else:
-                        pred_mask = torch.clamp(torch.stack(predicted_masks).sum(dim=0), max=1.0)
-                    batch_pred_masks.append(pred_mask)
-                pred_mask = torch.stack(batch_pred_masks)  # [B, H, W]
-                pred_mask = pred_mask.unsqueeze(1)         # [B, 1, H, W]
-                val_f1 = f1_score(pred_mask, masks.unsqueeze(1).float()).item()
-                val_f1s.append(val_f1)
-        mean_f1 = np.mean(val_f1s)
-        print(f"Epoch {epoch+1}: Val F1 = {mean_f1:.4f}")
+                        pred_masks = torch.stack(predicted_masks)  # [M, H, W]
+                    gt_masks = masks[b, 1:]  # [N, H, W]
+                    gt_masks = gt_masks[gt_masks.sum(dim=(1,2)) > 0]
+                    if gt_masks.shape[0] == 0:
+                        continue
+                    # Tính F1 cho từng cặp matched (Hungarian matching)
+                    M, N = pred_masks.shape[0], gt_masks.shape[0]
+                    f1_matrix = torch.zeros(M, N, device=pred_masks.device)
+                    for i in range(M):
+                        for j in range(N):
+                            f1_matrix[i, j] = f1_score(pred_masks[i], gt_masks[j])
+                    import scipy.optimize
+                    matched_pred, matched_gt = scipy.optimize.linear_sum_assignment(-f1_matrix.cpu().numpy())
+                    f1_scores = f1_matrix[matched_pred, matched_gt]
+                    val_f1s.append(f1_scores.mean().item())
+        mean_f1 = np.mean(val_f1s) if len(val_f1s) > 0 else 0.0
+        print(f"Epoch {epoch+1}: Val Instance F1 = {mean_f1:.4f}")
 
         # Save model for each epoch, no need to save best model
         torch.save(model.state_dict(), f"model_epoch_{epoch+1}.pth")

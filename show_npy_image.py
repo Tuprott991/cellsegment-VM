@@ -10,5 +10,5 @@ def show_npy_image(file_path):
     plt.show()
 
 if __name__ == "__main__":
-    file_path = "prepared/masks/0030fd0e6378.npy"  # Replace with your .npy file path
+    file_path = "prepared/masks/053d61766edb.npy"  # Replace with your .npy file path
     show_npy_image(file_path)

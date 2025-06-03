@@ -7,3 +7,4 @@ load_datasets.ipynb
 data_train.npy
 mask_train.npy
 best_model.pth
+model_epoch_17.pth

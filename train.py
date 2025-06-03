@@ -175,7 +175,14 @@ def train():
                     f1_matrix = torch.zeros(M, N, device=pred_masks.device)
                     for i in range(M):
                         for j in range(N):
-                            f1_matrix[i, j] = f1_score(pred_masks[i], gt_masks[j])
+                            pred = pred_masks[i]
+                            gt = gt_masks[j]
+                            if pred.shape != gt.shape:
+                                gt = gt.float()
+                                gt = torch.nn.functional.interpolate(
+                                    gt.unsqueeze(0).unsqueeze(0), size=pred.shape, mode='nearest'
+                                ).squeeze(0).squeeze(0)
+                            f1_matrix[i, j] = f1_score(pred, gt)
                     import scipy.optimize
                     matched_pred, matched_gt = scipy.optimize.linear_sum_assignment(-f1_matrix.cpu().numpy())
                     f1_scores = f1_matrix[matched_pred, matched_gt]

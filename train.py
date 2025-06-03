@@ -21,12 +21,17 @@ def instance_dice_loss(pred_masks, gt_masks):
     dice_matrix = torch.zeros(M, N, device=pred_masks.device)
     for i in range(M):
         for j in range(N):
-            dice_matrix[i, j] = dice_single(pred_masks[i], gt_masks[j])
+            pred = pred_masks[i]
+            gt = gt_masks[j]
+            if pred.shape != gt.shape:
+                gt = torch.nn.functional.interpolate(
+                    gt.unsqueeze(0).unsqueeze(0), size=pred.shape, mode='nearest'
+                ).squeeze(0).squeeze(0)
+            dice_matrix[i, j] = dice_single(pred, gt)
     # Hungarian matching (maximize dice)
     import scipy.optimize
     matched_pred, matched_gt = scipy.optimize.linear_sum_assignment(-dice_matrix.cpu().numpy())
     dice_scores = dice_matrix[matched_pred, matched_gt]
-    # Trung bình Dice cho các cặp matched
     return 1 - dice_scores.mean()
 
 def bce_loss(pred, target):

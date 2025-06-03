@@ -55,7 +55,7 @@ def train():
     images_dir = "/kaggle/input/cell-segment/images"
     masks_dir = "/kaggle/input/cell-segment/masks"
     batch_size = 3
-    num_epochs = 30
+    num_epochs = 100
     pretrain_epochs = 10
     batches_per_epoch = 1000
     lr = 0.001
@@ -162,7 +162,11 @@ def train():
                         pred_masks = torch.zeros((1, *masks.shape[-2:]), device=masks.device)  # [1, H, W]
                     else:
                         pred_masks = torch.stack(predicted_masks)  # [M, H, W]
-                    gt_masks = masks[b, 1:]  # [N, H, W]
+                    gt_masks = masks[b, 1:]  # [N, H, W] hoặc [H, W] nếu chỉ có 1 instance
+                    if gt_masks.ndim == 2:
+                        gt_masks = gt_masks.unsqueeze(0)  # [1, H, W]
+                    if gt_masks.shape[0] == 0:
+                        continue
                     gt_masks = gt_masks[gt_masks.sum(dim=(1,2)) > 0]
                     if gt_masks.shape[0] == 0:
                         continue

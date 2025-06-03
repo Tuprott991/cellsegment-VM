@@ -267,7 +267,7 @@ class InstanSegModel(nn.Module):
         s_map = S[0, 0]  # [H, W]
         # add gaussian blur to S to reduce noise
         s_map = gaussian_blur(s_map.unsqueeze(0).unsqueeze(0), kernel_size=[5, 5], sigma=[1.0, 1.0])[0, 0]
-        print(f"Processing distance map of shape {s_map.shape} for local maxima...")
+        # print(f"Processing distance map of shape {s_map.shape} for local maxima...")
         neigh_max = F.max_pool2d(s_map.unsqueeze(0).unsqueeze(0),
                                  kernel_size=3, stride=1, padding=1)  # [1,1,H,W]
         mask_local_max = (s_map.unsqueeze(0).unsqueeze(0) == neigh_max).float()
@@ -275,7 +275,7 @@ class InstanSegModel(nn.Module):
         seeds_mask = mask_local_max * foreground  # [1,1,H,W]
         seed_coords = torch.nonzero(seeds_mask[0, 0], as_tuple=False)  # [[i,j], ...]
 
-        print(f"Found {len(seed_coords)} seeds in the distance map.")
+        # print(f"Found {len(seed_coords)} seeds in the distance map.")
 
         # 2. Compute Q = P + O (broadcast O over batch)
         Q = P + O.unsqueeze(0)  # P: [1,Dp,H,W], O: [Dp,H,W]

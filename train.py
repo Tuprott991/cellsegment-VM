@@ -120,8 +120,11 @@ def train():
                 else:
                     pred_masks = torch.stack(predicted_masks)  # [M, H, W]
                 # Lấy ground truth instance masks cho ảnh này, giả sử masks[b, 1:] là các instance mask [N, H, W]
-                gt_masks = masks[b, 1:]  # [N, H, W]
-                # Loại bỏ instance mask toàn 0 (nếu có padding)
+                gt_masks = masks[b, 1:]  # [N, H, W] hoặc [H, W] nếu chỉ có 1 instance
+                if gt_masks.ndim == 2:
+                    gt_masks = gt_masks.unsqueeze(0)  # [1, H, W]
+                if gt_masks.shape[0] == 0:
+                    continue
                 gt_masks = gt_masks[gt_masks.sum(dim=(1,2)) > 0]
                 if gt_masks.shape[0] == 0:
                     continue
